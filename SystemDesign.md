@@ -524,6 +524,196 @@ db.bulk_insert(users)
 
 6. **Теплоотводящие материалы и конструкции.** Кроме технических систем охлаждения, также важно использовать теплоотводящие материалы и конструкции, чтобы уменьшить тепловую нагрузку на серверный центр. Это может включать в себя улучшенные системы утепления, специальные материалы для стоек и корпусов серверов и оптимизированные конструкции для улучшения циркуляции воздуха.
 
+## Методы управления энергопотреблением в целях оптимизации капасити и экономии ресурсов
+<a id="energy-management-methods-for-capacity-optimization-and-resource-saving"></a>
+([наверх](#sections))
+
+### Введение
+
+Энергопотребление становится критическим аспектом проектирования систем не только из-за стоимости, но и из-за ограничений по охлаждению, размещению оборудования и экологических требований (например, NetZero, ESG).
+
+**Цель управления энергопотреблением** — снизить расходы и улучшить эффективность использования вычислительных ресурсов **без деградации производительности и надёжности**.
+
+### Основные подходы
+
+#### 1. **Dynamic Voltage and Frequency Scaling (DVFS)**
+
+Механизм, при котором ЦП/ГП ускоряются или замедляются путём изменения напряжения и частоты.
+
+**Формула:**
+
+Энергопотребление процессора приблизительно пропорционально:
+
+$$
+P \propto C \cdot V^2 \cdot f
+$$
+
+где:
+
+* $P$ — мощность,
+* $C$ — ёмкость (постоянная для процессора),
+* $V$ — напряжение,
+* $f$ — тактовая частота.
+
+**Следствие:**
+Снижение частоты и напряжения — **квадратичное** снижение энергопотребления.
+
+**Пример (Linux, cpufreq):**
+
+```bash
+# Проверить текущую частоту
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
+
+# Установить governor (режим управления частотой)
+echo "powersave" > /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
+
+#### 2. **Power-aware workload scheduling**
+
+Перенос задач между серверами в зависимости от энергопрофиля.
+Например, активные задачи отдаются узлам с **энергоэффективной архитектурой** (ARM), а не x86.
+
+**Пример (Kubernetes power-aware scheduling):**
+
+* Node labels:
+
+  ```yaml
+  node-role.kubernetes.io/energy-efficient: "true"
+  ```
+* Scheduling constraints:
+
+  ```yaml
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/energy-efficient
+                operator: In
+                values:
+                  - "true"
+  ```
+
+#### 3. **Auto-scaling и Load Shedding**
+
+##### 3.1 Horizontal Pod Autoscaling (HPA)
+
+Автоматическое масштабирование на основе метрик (CPU, custom, energy-aware).
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+```
+
+##### 3.2 Load Shedding — отказ от некритичных задач при перегрузке
+
+**Пример:**
+
+```python
+if cpu_load > 80:
+    reject_low_priority_requests()
+```
+
+#### 4. **Turn-off / Deep Sleep (C-states, T-states)**
+
+Сервер может входить в глубокий спящий режим, когда не используется.
+Используется в масштабных кластерах и облачных провайдерах.
+
+**Intel C-states:**
+
+* C0 — активный
+* C1, C2, … — прогрессивно более "глубокий" сон
+
+**Пример настройки (Linux):**
+
+```bash
+# Запретить переход в глубокие состояния
+echo 1 > /sys/devices/system/cpu/intel_idle/max_cstate
+```
+
+#### 5. **Energy-aware programming**
+
+##### 5.1 Минимизация I/O
+
+I/O-операции — очень энергозатратны (особенно на SSD и HDD).
+
+**Пример (Python, write batching):**
+
+```python
+# Вместо записи по одному
+with open("log.txt", "w") as f:
+    for line in lines:
+        f.write(line)
+
+# Лучше — записывать пачкой
+with open("log.txt", "w") as f:
+    f.writelines(lines)
+```
+
+##### 5.2 Алгоритмы с энергоэффективной сложностью
+
+Низкое энергопотребление напрямую связано с меньшей вычислительной сложностью.
+
+**Пример:**
+
+* Алгоритм с $O(n)$ предпочтительнее $O(n \log n)$, если точность допустима.
+* Пример применения bloom filter для предикативной фильтрации:
+
+```python
+from pybloom_live import BloomFilter
+bloom = BloomFilter(capacity=100000, error_rate=0.001)
+```
+
+### Метрики энергопотребления и оптимизации
+
+* **PUE (Power Usage Effectiveness)**:
+
+  $$
+  \text{PUE} = \frac{\text{Total Facility Power}}{\text{IT Equipment Power}}
+  $$
+
+  Хорошее значение — **менее 1.2**
+
+* **Watt per request** или **Joules per inference** (в ML):
+
+  $$
+  \text{Efficiency} = \frac{\text{Energy Used}}{\text{of Successful Operations}}
+  $$
+
+* **Node-level metering** — с помощью IPMI:
+
+```bash
+ipmitool sensor | grep -i power
+```
+
+### Экосистемные инструменты и практики
+
+| Инструмент             | Назначение                                   |
+| ---------------------- | -------------------------------------------- |
+| `powertop`             | Анализ энергопотребления Linux               |
+| `Intel RAPL`           | Измерение и лимитирование CPU power          |
+| `Green Kubernetes`     | Исследовательские проекты с energy-awareness |
+| `AWS Graviton`         | Энергоэффективные ARM-инстансы               |
+| `GCP Carbon Footprint` | Метрики и отчёты по CO2-интенсивности        |
+
+### Результаты оптимизаций в реальных системах
+
+* В Facebook и Google DVFS дал до **30% снижения энергопотребления** в off-peak часы.
+* Google YouTube Edge CDN: load shedding при росте температуры CPU снижает аварии на 70%.
+* Microsoft Azure внедрила Power Capping — снижение нагрузки при приближении к лимиту энергоблока.
+
+
+## Влияние физической конфигурации на капасити и производительность сервера
+<a id="impact-of-physical-configuration-on-server-capacity-and-performance"></a>
+
 # Оценка текущей капасити и прогнозирование роста
 <a id="Capacity-Assessment-and-Forecasting"></a>
 
@@ -626,22 +816,76 @@ db.bulk_insert(users)
 10. **Сроки обновлений и масштабирования.** Планирование сроков обновлений и масштабирования системы важно для обеспечения бесперебойной работы и избежания простоев.
 
 
-## Как вы оцените текущую загрузку серверов в <название компании>?
-<a id="How-Do-You-Assess-Current-Server-Load"></a>
+# Оптимизация использования ресурсов
+<a id="Resource-Utilization-Optimization"></a>
 ([наверх](#sections))
 
-## Как вы оцените текущую загрузку серверов в <название компании>?
-<a id="How-Do-You-Assess-Current-Server-Load"></a>
+## Какие стратегии вы предложите для оптимизации использования ресурсов?
+<a id="Strategies-for-Resource-Optimization"></a>
+([наверх](#sections))
+## Как вы будете реагировать на неэффективное использование ресурсов?
+<a id="Responding-to-Inefficient-Resource-Use"></a>
+([наверх](#sections))
+## Какие методы вы используете для определения узких мест и повышения эффективности использования капасити?
+<a id="Methods-for-Identifying-Bottlenecks-and-Improving-Capacity-Utilization"></a>
 ([наверх](#sections))
 
-## Как вы оцените текущую загрузку серверов в <название компании>?
-<a id="How-Do-You-Assess-Current-Server-Load"></a>
+# Управление проектами Capacity
+<a id="Capacity-Project-Management"></a>
 ([наверх](#sections))
 
-## Как вы оцените текущую загрузку серверов в <название компании>?
-<a id="How-Do-You-Assess-Current-Server-Load"></a>
+## Как вы будете управлять портфелем проектов Capacity?](#Managing-the-Capacity-Project-Portfolio)
+## Какие ключевые метрики и инструменты вы будете использовать для отслеживания прогресса проектов?
+<a id="Key-Metrics-and-Tools-for-Tracking-Project-Progress"></a>
+([наверх](#sections))
+## Как вы будете управлять рисками, связанными с проектами Capacity?
+<a id="Managing-Risks-Associated-with-Capacity-Projects"></a>
 ([наверх](#sections))
 
-## Как вы оцените текущую загрузку серверов в <название компании>?
-<a id="How-Do-You-Assess-Current-Server-Load"></a>
+# Проектирование процессов
+<a id="Process-Design"></a>
 ([наверх](#sections))
+
+## С чего вы начнёте оптимизацию процессов Capacity Management?
+<a id="Starting-Point-for-Capacity-Management-Process-Optimization"></a>
+([наверх](#sections))
+## Как вы будете измерять успех вашей стратегии и процессов Capacity Management?
+<a id="Measuring-the-Success-of-Your-Capacity-Management-Strategy-and-Processes"></a>
+([наверх](#sections))
+
+# Аналитика и данные
+<a id="Analytics-and-Data"></a>
+([наверх](#sections))
+
+## Как вы будете использовать SQL или Python для анализа данных в области Capacity Management?
+<a id="Using-SQL-or-Python-for-Data-Analysis-in-Capacity-Management"></a>
+([наверх](#sections))
+## Какие типы аналитических отчетов и метрик вы будете разрабатывать для мониторинга капасити?
+<a id="Types-of-Analytical-Reports-and-Metrics-for-Capacity-Monitoring"></a>
+([наверх](#sections))
+## Как вы будете обеспечивать достоверность данных, используемых для принятия решений в области Capacity Management?
+<a id="Ensuring-Data-Integrity-for-Decision-Making-in-Capacity-Management"></a>
+([наверх](#sections))
+
+# Технические знания
+<a id="Technical-Knowledge"></a>
+([наверх](#sections))
+
+## Какие основные компоненты составляют серверную инфраструктуру в дата-центрах?
+<a id="Key-Components-of-Server-Infrastructure-in-Data-Centers"></a>
+([наверх](#sections))
+## Какие основные технологии используются для масштабирования кластеров и расширения капасити?
+<a id="Core-Technologies-for-Scaling-Clusters-and-Expanding-Capacity"></a>
+([наверх](#sections))
+## Как вы оцените пропускную способность сети и примените эту информацию к управлению капасити?
+<a id="Evaluating-Network-Capacity-and-Applying-This-Information-to-Capacity-Management"></a>
+([наверх](#sections))
+
+# Балансировщик нагрузки
+<a id="Load-Balancer"></a>
+([наверх](#sections))
+
+## Зачем между приложением и вебсерверами нужен балансировщик нагрузки в контексте систем дизайна?
+<a id="Why-is-a-Load-Balancer-Needed-Between-Application-and-Web-Servers-in-System-Design-Context"></a>
+([наверх](#sections))
+
