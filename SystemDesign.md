@@ -1459,10 +1459,16 @@ $$RPS_{net} \approx \frac{BW_{net}}{B_{net_{req}}}$$
 <a id="Capacity-Project-Management"></a>
 ([наверх](#sections))
 
-## Как вы будете управлять портфелем проектов Capacity?(#Managing-the-Capacity-Project-Portfolio)
+## Как вы будете управлять портфелем проектов Capacity?
+<a id="Managing-the-Capacity-Project-Portfolio"></a>
+([наверх](#sections))
+
+
+
 ## Какие ключевые метрики и инструменты вы будете использовать для отслеживания прогресса проектов?
 <a id="Key-Metrics-and-Tools-for-Tracking-Project-Progress"></a>
 ([наверх](#sections))
+
 ## Как вы будете управлять рисками, связанными с проектами Capacity?
 <a id="Managing-Risks-Associated-with-Capacity-Projects"></a>
 ([наверх](#sections))
