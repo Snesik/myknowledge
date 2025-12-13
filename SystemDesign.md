@@ -1653,11 +1653,118 @@ $$CostPerThroughput = \frac{InfraCost}{Throughput}$$
 
 # Аналитика и данные
 <a id="Analytics-and-Data"></a>
-([наверх](#sections))
 
 ## Как вы будете использовать SQL или Python для анализа данных в области Capacity Management?
 <a id="Using-SQL-or-Python-for-Data-Analysis-in-Capacity-Management"></a>
 ([наверх](#sections))
+
+Я использую SQL и Python как два дополняющих инструмента. SQL быстро дает честную картину по фактам в логах и метриках. Python нужен там, где начинается моделирование, прогнозирование и эксперименты "что будет, если".
+
+**Как использую SQL в Capacity Management**
+
+SQL я применяю, чтобы разложить нагрузку по компонентам и посчитать стоимость единицы работы. Обычно это делается на данных из query log базы, метрик приложения, reverse proxy, трассировки.
+
+Первый шаг, получить профиль нагрузки по времени и по "ключам", endpoint, tenant, тип запроса, класс джобы. Простейшая основа, RPS и хвосты latency.
+
+```sql
+-- RPS и p95 по эндпоинтам по минутам
+SELECT
+  date_trunc('minute', ts) AS t,
+  endpoint,
+  count(*) AS req,
+  percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+FROM api_requests
+WHERE ts >= now() - interval '7 days'
+GROUP BY 1, 2;
+```
+
+Дальше я ищу, где сгорает капасити, через "стоимость запроса". Для CPU это $CPU_{ms}/req$, для базы это число обращений, время в БД, объем прочитанных строк, для сети это $Bytes_{net}/req$. В SQL удобно сразу считать взвешенные показатели.
+
+```sql
+-- Средняя и p95 стоимость по CPU на один запрос
+SELECT
+  endpoint,
+  count(*) AS req,
+  avg(cpu_ms) AS cpu_ms_avg,
+  percentile_cont(0.95) WITHIN GROUP (ORDER BY cpu_ms) AS cpu_ms_p95
+FROM api_requests
+WHERE ts >= now() - interval '24 hours'
+GROUP BY 1
+ORDER BY cpu_ms_p95 DESC
+LIMIT 20;
+```
+
+Третий класс задач в SQL, найти "виновников" по ресурсам, top-N по нагрузке. Например, самые тяжелые SQL-запросы в Postgres через pg_stat_statements или в ClickHouse через system.query_log, либо джобы, которые создают пики I/O.
+
+```sql
+-- Top запросов по суммарному времени в БД
+SELECT
+  queryid,
+  calls,
+  total_time_ms,
+  mean_time_ms,
+  rows
+FROM pg_stat_statements
+ORDER BY total_time_ms DESC
+LIMIT 20;
+```
+
+Четвертый класс задач, построение кривой насыщения. Я группирую интервалы по уровню нагрузки и смотрю, как ведет себя p95 и ошибки. Это помогает увидеть точку излома и отделить CPU-лимит от ожиданий.
+
+```sql
+-- Связь нагрузки и p95, группировка по "корзинам" RPS
+WITH per_min AS (
+  SELECT
+    date_trunc('minute', ts) AS t,
+    count(*)/60.0 AS rps,
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+  FROM api_requests
+  WHERE ts >= now() - interval '3 days'
+  GROUP BY 1
+)
+SELECT
+  width_bucket(rps, 0, 5000, 20) AS rps_bucket,
+  avg(rps) AS rps_avg,
+  avg(p95_ms) AS p95_ms_avg
+FROM per_min
+GROUP BY 1
+ORDER BY 1;
+```
+
+В итоге SQL дает базу для решений. Где именно тратится ресурс, как меняется стоимость запроса, какие сценарии формируют пики, какие конкретные запросы или endpoint упираются первыми.
+
+**Как использую Python**
+
+Python подключаю, когда нужно сделать то, что в SQL неудобно или слишком громоздко.
+
+1. Прогноз нагрузки и сезонности. Беру таймсерии RPS, активных пользователей, объемов данных, добавляю календарные признаки, строю прогноз и доверительный интервал. Это превращает Capacity из реакции на "вчера было плохо" в планирование.
+
+2. Детект аномалий и сдвигов. Например, резко изменился профиль трафика и вырос $CPU_{ms}/req$. Я ищу change point и связываю его с релизами, фичами, маркетинговыми кампаниями.
+
+3. Моделирование "что будет, если". Сценарии роста, изменение лимитов пулов, включение компрессии, перенос части нагрузки в кеш. Тут Python удобен тем, что можно быстро прогнать симуляцию на исторических данных.
+
+Пример мини-пайплайна, который связывает рост p95 с ростом стоимости запроса по CPU и помогает проверить гипотезу про деградацию кода после релиза.
+
+```python
+import pandas as pd
+
+df = pd.read_parquet("api_minute_agg.parquet")  # t, rps, p95_ms, cpu_ms_avg, errors
+df = df.sort_values("t")
+
+# простая проверка, что p95 растет вместе с cpu_ms_avg при сопоставимом rps
+corr = df[["p95_ms", "cpu_ms_avg", "rps"]].corr()
+print(corr)
+
+# поиск подозрительных минут, когда p95 вырос сильнее, чем обычно при данном rps
+q = df.query("rps > 0")
+baseline = q.groupby(pd.qcut(q["rps"], 20))["p95_ms"].median()
+q["bucket"] = pd.qcut(q["rps"], 20)
+q["p95_baseline"] = q["bucket"].map(baseline)
+suspect = q[q["p95_ms"] > 1.5 * q["p95_baseline"]]
+print(suspect[["t", "rps", "p95_ms", "cpu_ms_avg", "errors"]].tail(20))
+```
+
+Смысл такой. SQL отвечает на вопрос "что происходит и где". Python отвечает на вопрос "почему, что будет дальше и какой эффект дадут варианты".
 
 ## Какие типы аналитических отчетов и метрик вы будете разрабатывать для мониторинга капасити?
 <a id="Types-of-Analytical-Reports-and-Metrics-for-Capacity-Monitoring"></a>
